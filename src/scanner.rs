@@ -10,10 +10,45 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use walkdir::WalkDir;
+
+/// Shared progress state for a running scan. Counters are atomic so
+/// the UI thread can poll them without a lock.
+#[derive(Debug, Default)]
+pub struct ScanProgress {
+    /// Total entries walkdir has yielded (pre-filter).
+    pub entries_seen: AtomicU64,
+    /// Files that passed all filters and were recorded.
+    pub files_scanned: AtomicU64,
+    /// Cumulative bytes of recorded files.
+    pub bytes_scanned: AtomicU64,
+    /// Currently processing directory (updated as the walk descends).
+    pub current_path: Mutex<Option<PathBuf>>,
+    /// Set to true to request cancellation. The scanner checks this
+    /// between entries and returns early with whatever it has.
+    pub cancel: AtomicBool,
+}
+
+impl ScanProgress {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot_current_path(&self) -> Option<PathBuf> {
+        self.current_path.lock().ok().and_then(|g| g.clone())
+    }
+}
 
 /// One file as observed by the scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +128,7 @@ pub struct Scanner {
     options: ScanOptions,
     report: ScanReport,
     entries: Vec<FileEntry>,
+    progress: Option<Arc<ScanProgress>>,
 }
 
 impl Scanner {
@@ -101,7 +137,16 @@ impl Scanner {
             options,
             report: ScanReport::default(),
             entries: Vec::new(),
+            progress: None,
         }
+    }
+
+    /// Attach a shared progress handle. The scanner will update
+    /// atomic counters as it walks, and will bail out early if
+    /// [`ScanProgress::request_cancel`] is called.
+    pub fn with_progress(mut self, progress: Arc<ScanProgress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     /// Walk `root` and collect entries. The scanner never reads file
@@ -146,6 +191,12 @@ impl Scanner {
         });
 
         for dent in iter {
+            if let Some(p) = &self.progress
+                && p.is_cancelled()
+            {
+                break;
+            }
+
             let dent = match dent {
                 Ok(d) => d,
                 Err(_) => {
@@ -153,6 +204,15 @@ impl Scanner {
                     continue;
                 }
             };
+
+            if let Some(p) = &self.progress {
+                p.entries_seen.fetch_add(1, Ordering::Relaxed);
+                if dent.file_type().is_dir() {
+                    if let Ok(mut guard) = p.current_path.lock() {
+                        *guard = Some(dent.path().to_path_buf());
+                    }
+                }
+            }
 
             let file_name = dent
                 .path()
@@ -188,6 +248,10 @@ impl Scanner {
 
             self.report.files_scanned += 1;
             self.report.total_bytes += meta.len();
+            if let Some(p) = &self.progress {
+                p.files_scanned.fetch_add(1, Ordering::Relaxed);
+                p.bytes_scanned.fetch_add(meta.len(), Ordering::Relaxed);
+            }
             self.entries.push(FileEntry::from_metadata(
                 dent.path().to_path_buf(),
                 &meta,
@@ -493,6 +557,58 @@ mod tests {
         let mut s = Scanner::new(ScanOptions::default());
         s.scan(&dir).unwrap();
         assert_eq!(s.entries().len(), 10);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_progress_counters_increment() {
+        let dir = make_temp_dir();
+        for i in 0..5 {
+            write_file(&dir, &format!("f{}.txt", i), b"x");
+        }
+        let progress = ScanProgress::new();
+        let mut s = Scanner::new(ScanOptions::default()).with_progress(progress.clone());
+        s.scan(&dir).unwrap();
+        assert_eq!(
+            progress.files_scanned.load(Ordering::Relaxed),
+            5,
+            "files_scanned counter must match walker result"
+        );
+        assert!(progress.entries_seen.load(Ordering::Relaxed) >= 5);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_progress_bytes_counter_matches_total() {
+        let dir = make_temp_dir();
+        write_file(&dir, "a", &[0u8; 100]);
+        write_file(&dir, "b", &[0u8; 250]);
+        let progress = ScanProgress::new();
+        let mut s = Scanner::new(ScanOptions::default()).with_progress(progress.clone());
+        s.scan(&dir).unwrap();
+        assert_eq!(
+            progress.bytes_scanned.load(Ordering::Relaxed),
+            350
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_progress_cancel_stops_scan_early() {
+        // Create a directory with many files, then cancel before the
+        // scan starts. The scanner checks is_cancelled at the top of
+        // each loop iteration.
+        let dir = make_temp_dir();
+        for i in 0..50 {
+            write_file(&dir, &format!("f{}.txt", i), b"x");
+        }
+        let progress = ScanProgress::new();
+        progress.request_cancel();
+        let mut s = Scanner::new(ScanOptions::default()).with_progress(progress.clone());
+        s.scan(&dir).unwrap();
+        // Because cancel was set before scan started, the loop should
+        // exit immediately and scan zero entries.
+        assert_eq!(progress.files_scanned.load(Ordering::Relaxed), 0);
         fs::remove_dir_all(&dir).ok();
     }
 
