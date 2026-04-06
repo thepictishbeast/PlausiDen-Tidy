@@ -33,6 +33,7 @@
 
 pub mod action;
 pub mod age_analyzer;
+pub mod cleaners;
 pub mod dedup;
 pub mod environment;
 pub mod error;
