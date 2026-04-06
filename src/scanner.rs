@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -119,7 +121,31 @@ impl Scanner {
             walker = walker.same_file_system(true);
         }
 
-        for dent in walker {
+        // Prune hidden directories at walk time so their children
+        // don't leak into the results — filtering after the fact is
+        // too late because walkdir has already descended. We count
+        // skipped hidden entries via an atomic so the counter
+        // survives the closure capture.
+        let include_hidden = self.options.include_hidden;
+        let skipped_hidden = Arc::new(AtomicUsize::new(0));
+        let skipped_hidden_inner = skipped_hidden.clone();
+        let iter = walker.into_iter().filter_entry(move |dent| {
+            if include_hidden || dent.depth() == 0 {
+                return true;
+            }
+            let name = dent
+                .path()
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if name.starts_with('.') {
+                skipped_hidden_inner.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            true
+        });
+
+        for dent in iter {
             let dent = match dent {
                 Ok(d) => d,
                 Err(_) => {
@@ -168,6 +194,7 @@ impl Scanner {
             ));
         }
 
+        self.report.skipped_hidden += skipped_hidden.load(Ordering::Relaxed) as u64;
         Ok(())
     }
 
@@ -342,5 +369,155 @@ mod tests {
         let r = ScanReport::default();
         assert_eq!(r.files_scanned, 0);
         assert_eq!(r.total_bytes, 0);
+    }
+
+    #[test]
+    fn test_hidden_dirs_are_pruned_not_descended() {
+        // Regression: walkdir used to descend into hidden directories
+        // while the scanner skipped the dir entry itself, so any
+        // non-hidden file *inside* a hidden dir leaked into results.
+        let dir = make_temp_dir();
+        let hidden = dir.join(".hidden_dir");
+        fs::create_dir_all(&hidden).unwrap();
+        write_file(&hidden, "leaked.txt", b"should not appear");
+        write_file(&dir, "visible.txt", b"ok");
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&dir).unwrap();
+        let paths: Vec<_> = s
+            .entries()
+            .iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("visible.txt")));
+        assert!(
+            !paths.iter().any(|p| p.contains("leaked.txt")),
+            "hidden dir children leaked into results: {:?}",
+            paths
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_include_hidden_traverses_hidden_dirs() {
+        let dir = make_temp_dir();
+        let hidden = dir.join(".hidden_dir");
+        fs::create_dir_all(&hidden).unwrap();
+        write_file(&hidden, "nested.txt", b"x");
+        let opts = ScanOptions {
+            include_hidden: true,
+            ..Default::default()
+        };
+        let mut s = Scanner::new(opts);
+        s.scan(&dir).unwrap();
+        assert!(
+            s.entries()
+                .iter()
+                .any(|e| e.path.to_string_lossy().contains("nested.txt"))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_scan_root_may_be_dot_dir() {
+        // The root directory itself is allowed to be a dotdir — we
+        // only prune *descendants* whose name starts with `.`.
+        let parent = make_temp_dir();
+        let root = parent.join(".dotroot");
+        fs::create_dir_all(&root).unwrap();
+        write_file(&root, "visible.txt", b"x");
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&root).unwrap();
+        assert_eq!(s.entries().len(), 1);
+        fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn test_skipped_hidden_counter_increments() {
+        let dir = make_temp_dir();
+        write_file(&dir, ".foo", b"x");
+        write_file(&dir, ".bar", b"x");
+        write_file(&dir, "visible", b"x");
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&dir).unwrap();
+        assert_eq!(s.report().skipped_hidden, 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_scan_does_not_escape_root_via_symlink() {
+        let dir = make_temp_dir();
+        let outside = make_temp_dir();
+        write_file(&outside, "secret.txt", b"sensitive");
+        let link = dir.join("link-to-outside");
+        // Create a symlink pointing outside the scan root.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        // With follow_symlinks=false (default), the link should be
+        // skipped and "secret.txt" from outside must not appear.
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&dir).unwrap();
+        let paths: Vec<_> = s
+            .entries()
+            .iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("secret.txt")),
+            "scanner escaped the root via symlink: {:?}",
+            paths
+        );
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn test_zero_byte_file_is_recorded() {
+        let dir = make_temp_dir();
+        write_file(&dir, "empty", b"");
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&dir).unwrap();
+        assert_eq!(s.entries().len(), 1);
+        assert_eq!(s.entries()[0].size, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_deep_directory_tree() {
+        let dir = make_temp_dir();
+        let mut p = dir.clone();
+        for i in 0..10 {
+            p = p.join(format!("level{}", i));
+            fs::create_dir_all(&p).unwrap();
+            write_file(&p, "file.txt", b"x");
+        }
+        let mut s = Scanner::new(ScanOptions::default());
+        s.scan(&dir).unwrap();
+        assert_eq!(s.entries().len(), 10);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_max_depth_one_excludes_deeper() {
+        let dir = make_temp_dir();
+        let sub = dir.join("a").join("b");
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&dir, "top.txt", b"x");
+        write_file(&dir.join("a"), "mid.txt", b"x");
+        write_file(&sub, "deep.txt", b"x");
+        let opts = ScanOptions {
+            max_depth: Some(2),
+            ..Default::default()
+        };
+        let mut s = Scanner::new(opts);
+        s.scan(&dir).unwrap();
+        let names: Vec<_> = s
+            .entries()
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"top.txt".to_string()));
+        assert!(names.contains(&"mid.txt".to_string()));
+        assert!(!names.contains(&"deep.txt".to_string()));
+        fs::remove_dir_all(&dir).ok();
     }
 }
