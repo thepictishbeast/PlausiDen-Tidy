@@ -25,7 +25,10 @@
 pub mod action;
 pub mod age_analyzer;
 pub mod dedup;
+pub mod environment;
 pub mod error;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod importance;
 pub mod plan;
 pub mod scanner;
