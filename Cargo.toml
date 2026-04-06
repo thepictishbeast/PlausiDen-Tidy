@@ -1,0 +1,32 @@
+[package]
+name = "plausiden-tidy"
+version = "0.1.0"
+edition = "2024"
+description = "Smart filesystem cleaner with importance-aware safety and optional secure-wipe delegation to PlausiDen-Purge"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/redcaptian1917/PlausiDen-Tidy"
+readme = "README.md"
+keywords = ["cleanup", "duplicates", "privacy", "plausiden"]
+categories = ["filesystem", "command-line-utilities"]
+
+[lib]
+name = "plausiden_tidy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tidy"
+path = "src/bin/tidy.rs"
+
+[dependencies]
+blake3 = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+walkdir = "2.5"
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = []
+# Enable delegation to PlausiDen-Purge for secure multi-pass wipe instead of
+# the built-in simple delete. Off by default so Tidy is standalone.
+purge = []
