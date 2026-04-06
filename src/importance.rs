@@ -108,8 +108,11 @@ impl ImportanceClassifier {
 
         if let Some(home) = &self.home {
             let home_str = home.to_string_lossy();
+            // Append a trailing slash so that e.g. "Development" does
+            // not falsely match "DevelopmentSecrets".
             let under = |suffix: &str| -> bool {
-                s.starts_with(&format!("{}/{}", home_str, suffix))
+                let prefix = format!("{}/{}", home_str, suffix);
+                s == prefix || s.starts_with(&format!("{}/", prefix))
             };
 
             if under(".ssh") || under(".gnupg") {
@@ -378,6 +381,23 @@ mod tests {
         let v = c.classify(Path::new("/home/u/secret/whatever.txt"));
         assert_eq!(v.importance, Importance::Critical);
         assert_eq!(v.reason, Reason::UserBlocklist);
+    }
+
+    #[test]
+    fn test_prefix_does_not_match_similarly_named_dir() {
+        // Bug: "Development" as a prefix was matching "DevelopmentSecrets".
+        let mut c = ImportanceClassifier::new();
+        c.home = Some(PathBuf::from("/home/u"));
+        let v = c.classify(Path::new("/home/u/DevelopmentSecrets/creds.txt"));
+        assert_ne!(v.importance, Importance::Critical);
+    }
+
+    #[test]
+    fn test_exact_match_to_development_is_critical() {
+        let mut c = ImportanceClassifier::new();
+        c.home = Some(PathBuf::from("/home/u"));
+        let v = c.classify(Path::new("/home/u/Development/main.rs"));
+        assert_eq!(v.importance, Importance::Critical);
     }
 
     #[test]

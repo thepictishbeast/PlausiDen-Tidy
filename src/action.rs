@@ -154,14 +154,11 @@ impl ActionExecutor for FsExecutor {
             ActionKind::SimpleDelete => remove_file(&action.path, action.size),
             ActionKind::MoveToTrash => move_to_trash(&action.path, action.size),
             ActionKind::SecurePurge => {
-                #[cfg(feature = "purge")]
-                {
-                    purge_delegate(&action.path, action.size)
-                }
-                #[cfg(not(feature = "purge"))]
-                {
-                    Err(TidyError::PurgeUnavailable)
-                }
+                // Tidy deliberately does not implement forensic-grade
+                // destruction. Callers that want SecurePurge must
+                // delegate to PlausiDen-Purge — the Atrium frontend
+                // wires up that delegation.
+                Err(TidyError::PurgeUnavailable)
             }
             ActionKind::Review => Ok(ActionResult {
                 path: action.path.clone(),
@@ -210,16 +207,6 @@ fn move_to_trash(path: &Path, size: u64) -> Result<ActionResult> {
         message: format!("moved to {}", dest.display()),
         bytes_reclaimed: size,
     })
-}
-
-#[cfg(feature = "purge")]
-fn purge_delegate(path: &Path, size: u64) -> Result<ActionResult> {
-    // Real implementation will shell out to `plausiden-purge` or link it
-    // as a path dependency. For now this is a stub returning a clear
-    // "not yet implemented" so the frontend knows the delegation hook
-    // is present even if the backend isn't wired.
-    let _ = (path, size);
-    Err(TidyError::PurgeUnavailable)
 }
 
 #[cfg(test)]
@@ -344,9 +331,8 @@ mod tests {
         assert!(!ActionKind::SecurePurge.description().is_empty());
     }
 
-    #[cfg(not(feature = "purge"))]
     #[test]
-    fn test_purge_without_feature_flag_errors() {
+    fn test_secure_purge_always_delegates() {
         let mut exec = FsExecutor::real();
         let mut a = PlanAction::new(
             PathBuf::from("/tmp/x"),

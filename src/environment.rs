@@ -93,10 +93,16 @@ impl EnvironmentReport {
 pub fn detect() -> EnvironmentReport {
     let virt = detect_virtualization();
     let storage = detect_storage_class();
-    let overwrite_effective = matches!(
-        (&virt, &storage),
-        (Virtualization::None, StorageClass::BareMetalHdd)
-    );
+
+    // Overwrite semantics are honored when we own the physical drive.
+    // That means bare metal on either HDD or SSD. Virtualized hosts,
+    // copy-on-write filesystems, and network storage all break the
+    // assumption.
+    let overwrite_effective = match (&virt, &storage) {
+        (Virtualization::None, StorageClass::BareMetalHdd) => true,
+        (Virtualization::None, StorageClass::BareMetalSsd) => true,
+        _ => false,
+    };
     let crypto_shred_recommended = !overwrite_effective;
 
     let mut notes = Vec::new();
@@ -108,7 +114,7 @@ pub fn detect() -> EnvironmentReport {
     }
     match storage {
         StorageClass::BareMetalSsd => notes.push(
-            "SSD wear-leveling means overwrites may land on different physical cells. Only the controller can truly erase a cell.".into(),
+            "SSD wear-leveling is imperfect: overwrite targets logical blocks, not physical cells. Pair with TRIM/discard for best effect.".into(),
         ),
         StorageClass::CopyOnWrite => notes.push(
             "Copy-on-write filesystems allocate new blocks on overwrite; old blocks persist in snapshots and free space.".into(),
@@ -273,6 +279,44 @@ mod tests {
         };
         let banner = report.warning_banner().unwrap();
         assert!(banner.contains("SSD"));
+    }
+
+    #[test]
+    fn test_bare_metal_hdd_is_overwrite_effective() {
+        let mut report = EnvironmentReport {
+            virtualization: Virtualization::None,
+            storage_class: StorageClass::BareMetalHdd,
+            overwrite_effective: true,
+            crypto_shred_recommended: false,
+            notes: vec![],
+        };
+        report.overwrite_effective = matches!(
+            (&report.virtualization, &report.storage_class),
+            (Virtualization::None, StorageClass::BareMetalHdd)
+                | (Virtualization::None, StorageClass::BareMetalSsd)
+        );
+        assert!(report.overwrite_effective);
+        assert!(report.warning_banner().is_none());
+    }
+
+    #[test]
+    fn test_bare_metal_ssd_is_overwrite_effective() {
+        let report = EnvironmentReport {
+            virtualization: Virtualization::None,
+            storage_class: StorageClass::BareMetalSsd,
+            overwrite_effective: true,
+            crypto_shred_recommended: false,
+            notes: vec![],
+        };
+        assert!(report.warning_banner().is_none());
+    }
+
+    #[test]
+    fn test_vps_suppresses_overwrite_effective() {
+        let report = detect();
+        if report.virtualization.is_virtualized() {
+            assert!(!report.overwrite_effective);
+        }
     }
 
     #[test]
