@@ -171,6 +171,34 @@ impl ActionExecutor for FsExecutor {
     }
 }
 
+/// Pick a destination filename inside `trash_files` that does not
+/// already exist. If `name` is free, use it; otherwise append
+/// `.1`, `.2`, … until we find an empty slot.
+///
+/// BUG ASSUMPTION: the filesystem changes between calls. A TOCTOU
+/// race between the existence check here and the subsequent rename
+/// is theoretically possible but would require another trash client
+/// creating a file in the split-second window.
+fn unique_trash_dest(trash_files: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let candidate = trash_files.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    // Up to 10_000 collision attempts before giving up with a random
+    // suffix derived from the wall clock. In practice the first few
+    // attempts always succeed.
+    for i in 1..10_000 {
+        let stem = format!("{}.{}", name.to_string_lossy(), i);
+        let candidate = trash_files.join(&stem);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fallback: timestamp suffix so we never return an existing path.
+    let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    trash_files.join(format!("{}.{}", name.to_string_lossy(), ts))
+}
+
 fn remove_file(path: &Path, size: u64) -> Result<ActionResult> {
     match std::fs::remove_file(path) {
         Ok(_) => Ok(ActionResult {
@@ -185,21 +213,60 @@ fn remove_file(path: &Path, size: u64) -> Result<ActionResult> {
 }
 
 fn move_to_trash(path: &Path, size: u64) -> Result<ActionResult> {
-    // XDG Trash spec: move to $XDG_DATA_HOME/Trash/files/
+    // XDG Trash spec: move to $XDG_DATA_HOME/Trash/files/ and drop a
+    // corresponding .trashinfo file into $XDG_DATA_HOME/Trash/info/.
+    //
+    // REGRESSION-GUARD: an earlier version used fs::rename(path, dest)
+    // directly, which silently clobbered any existing file at `dest`.
+    // Two files with the same name from different source dirs would
+    // lose the first one on the second trash move. Fixed by finding
+    // the first unique destination name and never overwriting.
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         TidyError::io(
             path.to_path_buf(),
             std::io::Error::other("HOME not set; cannot locate trash"),
         )
     })?;
-    let trash_dir = home.join(".local/share/Trash/files");
-    std::fs::create_dir_all(&trash_dir).map_err(|e| TidyError::io(trash_dir.clone(), e))?;
+    let trash_base = home.join(".local/share/Trash");
+    let trash_files = trash_base.join("files");
+    let trash_info = trash_base.join("info");
+    std::fs::create_dir_all(&trash_files)
+        .map_err(|e| TidyError::io(trash_files.clone(), e))?;
+    std::fs::create_dir_all(&trash_info)
+        .map_err(|e| TidyError::io(trash_info.clone(), e))?;
+
     let name = path
         .file_name()
         .map(|s| s.to_owned())
         .ok_or_else(|| TidyError::NotAFile(path.to_path_buf()))?;
-    let dest = trash_dir.join(name);
-    std::fs::rename(path, &dest).map_err(|e| TidyError::io(path.to_path_buf(), e))?;
+
+    // Pick a unique destination name. If `name` is free, use it.
+    // Otherwise append `.1`, `.2`, … until we find an unused slot.
+    let dest = unique_trash_dest(&trash_files, &name);
+
+    // Move the file. The uniquification above guarantees dest does
+    // not exist at this instant; a TOCTOU with concurrent trash
+    // clients is possible but extremely unlikely.
+    std::fs::rename(path, &dest)
+        .map_err(|e| TidyError::io(path.to_path_buf(), e))?;
+
+    // Write the .trashinfo sidecar per the FreeDesktop Trash spec.
+    // A malformed sidecar is not a hard error — the file is already
+    // in the trash directory at this point and a cleanup is the
+    // user's ordinary "empty trash" action.
+    let trashinfo_name = dest
+        .file_name()
+        .map(|s| format!("{}.trashinfo", s.to_string_lossy()))
+        .unwrap_or_else(|| "unknown.trashinfo".to_string());
+    let trashinfo_path = trash_info.join(trashinfo_name);
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let info_body = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        path.display(),
+        now
+    );
+    let _ = std::fs::write(&trashinfo_path, info_body);
+
     Ok(ActionResult {
         path: path.to_path_buf(),
         kind: ActionKind::MoveToTrash,
@@ -329,6 +396,52 @@ mod tests {
     fn test_action_kind_description_nonempty() {
         assert!(!ActionKind::SimpleDelete.description().is_empty());
         assert!(!ActionKind::SecurePurge.description().is_empty());
+    }
+
+    // REGRESSION-GUARD: the earlier move_to_trash used fs::rename
+    // which silently clobbered collisions. Two files named the same
+    // from different source directories would lose the first one.
+    #[test]
+    fn test_unique_trash_dest_avoids_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidy-trash-collision-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Pre-populate with a collision.
+        let existing = dir.join("foo.txt");
+        std::fs::write(&existing, b"existing").unwrap();
+
+        let first = unique_trash_dest(&dir, std::ffi::OsStr::new("foo.txt"));
+        // Should NOT equal the existing path.
+        assert_ne!(first, existing);
+        assert!(first.to_string_lossy().contains("foo.txt.1"));
+
+        // Create the .1 suffix to force the next call to pick .2.
+        std::fs::write(&first, b"first").unwrap();
+        let second = unique_trash_dest(&dir, std::ffi::OsStr::new("foo.txt"));
+        assert_ne!(second, first);
+        assert_ne!(second, existing);
+        assert!(second.to_string_lossy().contains("foo.txt.2"));
+
+        // The original file is untouched.
+        let existing_contents = std::fs::read(&existing).unwrap();
+        assert_eq!(existing_contents, b"existing");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_unique_trash_dest_no_collision_returns_plain_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidy-trash-clean-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = unique_trash_dest(&dir, std::ffi::OsStr::new("new.txt"));
+        assert_eq!(result, dir.join("new.txt"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
