@@ -12,13 +12,9 @@
 # through an adversarial path. Hold new deps to Purge's bar.
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
-yanked = "warn"
-
+version = 2
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -31,8 +27,6 @@ allow = [
     "CC0-1.0",
     "Zlib",
 ]
-copyleft = "deny"
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
