@@ -1,0 +1,24 @@
+name: Security Audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
+
+# cargo-deny only on the self-hosted runner — the cargo-audit pass is
+# parked across the PD-core (see Purge / Engine / Inject security.yml
+# for the full justification: Kali OS package can't parse CVSS:4.0,
+# rustup rust-src download bricks the install). cargo-deny check
+# advisories covers the same RUSTSEC database.
+
+jobs:
+  deny:
+    name: Cargo Deny
+    runs-on: [self-hosted, linux, x64, plausiden]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories sources
