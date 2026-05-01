@@ -1,0 +1,23 @@
+# composition.yml — composition / DRY enforcement audit.
+#
+# Vendored from PlausiDen-Audits (audit #79). Source-of-truth is
+# https://github.com/thepictishbeast/PlausiDen-Audits/blob/main/scripts/composition.py
+# Sync via the `vendor:composition` task in PlausiDen-Audits.
+
+name: Composition Audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * 1'
+
+jobs:
+  composition:
+    name: composition / mixins-traits-inheritance enforcement
+    runs-on: [self-hosted, linux, x64, plausiden]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run composition audit
+        run: python3 .github/scripts/composition.py all .

@@ -1,0 +1,8 @@
+{
+  "schema": "composition-baseline/1",
+  "comment": "Snapshot of pre-existing composition findings. Committed so the CI gate fails only on NEW findings. Re-snapshot via `python3 .github/scripts/composition.py baseline .`",
+  "suppressed": [
+    "rust-manual-derivable|src/dedup.rs|manual impl Default for Deduplicator (trivial body)",
+    "rust-manual-derivable|src/importance.rs|manual impl Default for ImportanceClassifier (trivial body)"
+  ]
+}
