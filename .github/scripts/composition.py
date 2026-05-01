@@ -172,6 +172,17 @@ SPACING_LITERAL = re.compile(r"\b(?<!--)\d+(?:\.\d+)?(px|rem|em)\b")
 NAMED_COLOUR = re.compile(r":\s*(white|black|red|blue|green|yellow)\s*[;}]", re.IGNORECASE)
 
 
+def _line_suppressed(line: str) -> bool:
+    """Both `composition-allow:` and `loom-allow:` suppress findings.
+
+    Two tools, one marker dialect. Either marker on the line ⇒ skip.
+    Reason text is required by both tools (an empty marker fails the
+    audit definition) but parsing the reason here would be brittle —
+    we rely on the audit checklist to enforce reason quality.
+    """
+    return "composition-allow:" in line or "loom-allow:" in line
+
+
 def check_css(root: Path, reporter: Reporter) -> None:
     bodies: dict[str, list[tuple[Path, int, str]]] = defaultdict(list)
     for p in walk(root, (".css", ".scss")):
@@ -186,6 +197,8 @@ def check_css(root: Path, reporter: Reporter) -> None:
             stripped = line.strip()
             if stripped.startswith(("//", "/*", "*", "#", "--")):
                 # Comment / custom-property declaration line
+                continue
+            if _line_suppressed(line):
                 continue
             if HEX_COLOUR.search(line):
                 reporter.add(Finding(
@@ -428,7 +441,8 @@ def check_dry(root: Path, reporter: Reporter) -> None:
         for i in range(len(lines) - min_lines + 1):
             window = lines[i : i + min_lines]
             # Skip if any line carries a per-line suppression marker
-            if any("composition-allow:" in ln for ln in window):
+            # (either composition-allow: or loom-allow: works).
+            if any(_line_suppressed(ln) for ln in window):
                 continue
             # Skip if any line in the window is trivial
             if any(DRY_TRIVIAL.match(ln) for ln in window):
