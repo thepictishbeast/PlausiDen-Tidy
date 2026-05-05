@@ -1,8 +1,8 @@
 # PlausiDen-Tidy
 
-Smart filesystem cleaner with importance-aware safety and optional secure-wipe delegation to [PlausiDen-Purge](https://github.com/redcaptian1917/PlausiDen-Purge).
+Smart filesystem cleaner with importance-aware safety and optional secure-wipe delegation to [PlausiDen-Purge](https://github.com/thepictishbeast/PlausiDen-Purge).
 
-Part of the [PlausiDen](https://github.com/redcaptian1917) civil rights toolkit. Where Purge provides paranoid multi-pass destruction, Tidy is the everyday cleaner you reach for when you just want to reclaim disk space without losing anything important.
+Part of the [PlausiDen](https://github.com/thepictishbeast) civil rights toolkit. Where Purge provides paranoid multi-pass destruction, Tidy is the everyday cleaner you reach for when you just want to reclaim disk space without losing anything important.
 
 ## Design goals
 
