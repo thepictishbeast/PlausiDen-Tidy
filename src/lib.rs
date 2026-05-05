@@ -7,9 +7,9 @@
 //! [`action::FsExecutor`] is dry-run-only.
 //!
 //! The graphical frontend lives in the separate
-//! [PlausiDen-Atrium](https://github.com/redcaptian1917/PlausiDen-Atrium)
+//! [PlausiDen-Atrium](https://github.com/thepictishbeast/PlausiDen-Atrium)
 //! crate. Antiforensic destruction lives in
-//! [PlausiDen-Purge](https://github.com/redcaptian1917/PlausiDen-Purge).
+//! [PlausiDen-Purge](https://github.com/thepictishbeast/PlausiDen-Purge).
 //! Tidy focuses on *tidying* — the everyday cleanup loop.
 //!
 //! ## Design principles
