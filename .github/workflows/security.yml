@@ -16,7 +16,7 @@ on:
 jobs:
   deny:
     name: Cargo Deny
-    runs-on: [self-hosted, linux, x64, plausiden]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2

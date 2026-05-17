@@ -16,7 +16,7 @@ on:
 jobs:
   composition:
     name: composition / mixins-traits-inheritance enforcement
-    runs-on: [self-hosted, linux, x64, plausiden]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Run composition audit
